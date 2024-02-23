@@ -36,3 +36,15 @@ pub fn generate_otp(secret: &[u8], counter: u64) -> Result<String, &'static str>
 
   Ok(format!("{:06}", code))
 }
+
+#[test]
+fn test_base32_encode() {
+  assert_eq!(base32_encode(b"hello"), "NBSWY3DP");
+
+  let secret = b"your_secret_key";
+  let counter = 123456;
+
+  assert_eq!(base32_encode(secret), "PFXXK4S7ONSWG4TFORPWWZLZ");
+
+  assert_eq!(generate_otp(secret, counter), Ok("811986".to_string()));
+}
