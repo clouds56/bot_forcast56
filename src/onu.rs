@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use select::predicate::Predicate;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -129,6 +130,26 @@ pub enum WanInfo {
   },
 }
 
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LanInfo {
+  // 客户端名称/主机名
+  // HostName
+  pub name: String,
+  // MAC地址: xx:xx:xx:xx:xx:xx
+  // MACAddr
+  pub mac: String,
+  // IP地址: 0.0.0.0
+  // IPAddr
+  pub ip: String,
+  // 剩余租期: 58473
+  // ExpiredTime
+  pub lease_time: String,
+  // 端口: LAN4
+  // PhyPortName
+  pub interface: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PortForwardingProtocol {
   #[serde(rename = "0")]
@@ -189,7 +210,7 @@ pub struct PortForwardingParam {
 }
 
 #[derive(Debug, Clone)]
-pub struct PortForwardingError {
+pub struct ApiResult {
   pub error_str: String,
   pub error_param: String,
   pub error_type: String,
@@ -216,12 +237,12 @@ impl Context {
     format!("{}/{}{}", self.base_url, self.session.as_ref().map(|s| s.url_next.as_str()).unwrap_or("getpage.gch?pid=1002&nextpage="), page)
   }
 
-  fn update_session(&mut self, result: &str) -> Result<bool> {
-    let session_token = match result.split("var session_token = ").nth(1) {
+  fn update_session(&mut self, resp: &str) -> Result<bool> {
+    let session_token = match resp.split("var session_token = ").nth(1) {
       Some(s) => s,
       _ => return Ok(false),
     }.splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("session_token parse failed"))?;
-    let url_next = result
+    let url_next = resp
       .split("function getURL(){var ret = ").nth(1).ok_or_else(|| anyhow::format_err!("url_next not found"))?
       .splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("url_next parse failed"))?;
     debug!("session_token: {}", session_token);
@@ -254,8 +275,8 @@ impl Context {
       password: String,
     }
     let client = self.client.clone();
-    let result = client.get(self.base_url()).send().await?.text().await?;
-    let login_token = result
+    let resp = client.get(self.base_url()).send().await?.text().await?;
+    let login_token = resp
       .split(r#"getObj("Frm_Logintoken").value = "#).nth(1).unwrap_or(r#""1""#)
       .splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("login_token parse failed"))?;
 
@@ -269,12 +290,12 @@ impl Context {
     };
 
     debug!("{:?}", login_param);
-    let result = client.post(self.base_url()).form(&login_param).send().await?.text().await?;
-    if result.len() > 0 && result.find(r#"<iframe width="808px" height="67px" src="top.gch" name="topFrame" scrolling="no" frameborder="0" id="topFrame"></iframe>"#).is_none() {
+    let resp = client.post(self.base_url()).form(&login_param).send().await?.text().await?;
+    if resp.len() > 0 && resp.find(r#"<iframe width="808px" height="67px" src="top.gch" name="topFrame" scrolling="no" frameborder="0" id="topFrame"></iframe>"#).is_none() {
       // parse error message
       // `getObj("errmsg").innerHTML = "用户信息有误，请重新输入。";`
-      debug!("content length: {}", result.len());
-      let errmsg = result
+      debug!("content length: {}", resp.len());
+      let errmsg = resp
         .replace("function SetDisabled()\n{\ngetObj(\"errmsg\").innerHTML", "function SetDisabled()\n{\ngetObj(\"errmsg\") .innerHTML")
         .split(r#"getObj("errmsg").innerHTML = "#).nth(1).unwrap_or(r#""login might failed""#)
         .splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("errmsg parse failed"))?
@@ -297,28 +318,49 @@ impl Context {
     })
   }
 
+  fn parse_node_text(node: select::node::Node<'_>) -> String {
+    match node.first_child() {
+      Some(e) if e.name() == Some("input") => {
+        e.attr("value").unwrap_or_default().to_string()
+      },
+      _ => node.text()
+    }
+  }
+
+  fn parse_transfer_meaning(resp: &str, field: &str) -> Option<String> {
+    let value = resp
+      .split(&format!("Transfer_meaning('{}',", field)).skip(1).last()?
+      .splitn(2, ')').nth(0)?
+      .trim().strip_prefix('\'')?.strip_suffix('\'')?
+      .replace("\\x2d", "\x2d")
+      .replace("\\x2e", "\x2e")
+      .replace("\\x3a", "\x3a")
+      .replace("\\x5f", "\x5f")
+      .to_string();
+    Some(value)
+  }
+
+  fn parse_api_result(resp: &str) -> ApiResult {
+    let error_str = Self::parse_transfer_meaning(resp, "IF_ERRORSTR").unwrap_or_default();
+    let error_param = Self::parse_transfer_meaning(resp, "IF_ERRORPARAM").unwrap_or_default();
+    let error_type = Self::parse_transfer_meaning(resp, "IF_ERRORTYPE").unwrap_or_default();
+    ApiResult {
+      error_str,
+      error_param,
+      error_type,
+    }
+  }
+
   pub async fn wan_info(&self) -> Result<Vec<WanInfo>> {
-    use select::predicate::{Class, Name, Predicate};
+    use select::predicate::{Class, Name};
     let client = self.client.clone();
-    let result = client.get(self.next_url("status_ethwan_if_t.gch")).send().await?.text().await?;
-    let dom = select::document::Document::from_read(result.as_bytes())?;
+    let resp = client.get(self.next_url("status_ethwan_if_t.gch")).send().await?.text().await?;
+    let dom = select::document::Document::from_read(resp.as_bytes())?;
     let mut result = Vec::new();
     for table in dom.find(Name("div").and(Class("space_0"))) {
       let mut kv = HashMap::new();
       for tr in table.find(Name("tr")) {
-        let mut td = tr.find(Name("td")).map(|i| {
-          // might be <Input type="text" class="uiNoBorder" style="text-align:left;" size=45 value="桥接" readonly>
-          match i.first_child() {
-            Some(e) => {
-              if e.name() == Some("input") {
-                e.attr("value").unwrap_or_default().to_string()
-              } else {
-                i.text()
-              }
-            },
-            _ => i.text()
-          }.trim().to_string()
-        });
+        let mut td = tr.find(Name("td")).map(|i| Self::parse_node_text(i).trim().to_string());
         kv.entry(td.next().unwrap_or_default()).or_insert(td.next().unwrap_or_default());
       }
       let wan_info = match kv.get("模式").map(String::as_str) {
@@ -356,64 +398,63 @@ impl Context {
     Ok(result)
   }
 
-  fn parse_forwarding_list(result: &str) -> Result<(PortForwardingError, Vec<PortForwardingParam>)> {
-    fn parse_transfer_meaning(result: &str, field: &str) -> Option<String> {
-      let value = result
-        .split(&format!("Transfer_meaning('{}',", field)).skip(1).last()?
-        .splitn(2, ')').nth(0)?
-        .trim().strip_prefix('\'')?.strip_suffix('\'')?
-        .replace("\\x2d", "\x2d")
-        .replace("\\x2e", "\x2e")
-        .replace("\\x3a", "\x3a")
-        .replace("\\x5f", "\x5f")
-        .to_string();
-      Some(value)
+  pub async fn lan_info(&self) -> Result<Vec<LanInfo>> {
+    let client = self.client.clone();
+    let resp = client.get(self.next_url("status_ethlan_dhcp_info_t.gch")).send().await?.text().await?;
+    std::fs::write("cache.html", &resp)?;
+    Self::parse_api_result(resp.as_str());
+    let count = Self::parse_transfer_meaning(resp.as_str(), "IF_INSTNUM").unwrap_or_default()
+      .parse::<usize>().map_err(|_| anyhow::format_err!("parse IF_INSTNUM"))?;
+    let mut result = Vec::new();
+    for i in 0..count {
+      result.push(LanInfo {
+        name: Self::parse_transfer_meaning(resp.as_str(), &format!("HostName{}", i)).unwrap_or_default(),
+        mac: Self::parse_transfer_meaning(resp.as_str(), &format!("MACAddr{}", i)).unwrap_or_default(),
+        ip: Self::parse_transfer_meaning(resp.as_str(), &format!("IPAddr{}", i)).unwrap_or_default(),
+        lease_time: Self::parse_transfer_meaning(resp.as_str(), &format!("ExpiredTime{}", i)).unwrap_or_default(),
+        interface: Self::parse_transfer_meaning(resp.as_str(), &format!("PhyPortName{}", i)).unwrap_or_default(),
+      });
     }
-    let error_str = parse_transfer_meaning(result, "IF_ERRORSTR").unwrap_or_else(|| "SUCC".to_string());
-    let error_param = parse_transfer_meaning(result, "IF_ERRORPARAM").unwrap_or_else(|| "SUCC".to_string());
-    let error_type = parse_transfer_meaning(result, "IF_ERRORTYPE").unwrap_or_else(|| "SUCC".to_string());
-    debug!("error_str: {}", error_str);
-    debug!("error_param: {}", error_param);
-    debug!("error_type: {}", error_type);
+    Ok(result)
+  }
 
+  fn parse_forwarding_list(resp: &str) -> Result<(ApiResult, Vec<PortForwardingParam>)> {
     let mut list = Vec::new();
-    let count = parse_transfer_meaning(result, "IF_INSTNUM").unwrap_or_default()
+    let count = Self::parse_transfer_meaning(resp, "IF_INSTNUM").unwrap_or_default()
       .parse::<usize>().map_err(|_| anyhow::format_err!("parse IF_INSTNUM"))?;
     for i in 0..count {
       list.push(PortForwardingParam {
-        enable: parse_transfer_meaning(result, &format!("Enable{}", i)).unwrap_or_default() == "1",
-        name: parse_transfer_meaning(result, &format!("Name{}", i)).unwrap_or_default(),
-        protocol: match parse_transfer_meaning(result, &format!("Protocol{}", i)).unwrap_or_default().as_str() {
+        enable: Self::parse_transfer_meaning(resp, &format!("Enable{}", i)).unwrap_or_default() == "1",
+        name: Self::parse_transfer_meaning(resp, &format!("Name{}", i)).unwrap_or_default(),
+        protocol: match Self::parse_transfer_meaning(resp, &format!("Protocol{}", i)).unwrap_or_default().as_str() {
           "0" => PortForwardingProtocol::TCP,
           "1" => PortForwardingProtocol::UDP,
           "2" => PortForwardingProtocol::Both,
           _ => anyhow::bail!("unknown protocol"),
         },
-        wan_interface: parse_transfer_meaning(result, &format!("WANCViewName{}", i)).unwrap_or_default(),
-        remote_addr_min: parse_transfer_meaning(result, &format!("MinRemoteHost{}", i)),
-        remote_addr_max: parse_transfer_meaning(result, &format!("MaxRemoteHost{}", i)),
-        remote_port_min: parse_transfer_meaning(result, &format!("MinExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinExtPort"))?,
-        remote_port_max: parse_transfer_meaning(result, &format!("MaxExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxExtPort"))?,
-        local_addr: parse_transfer_meaning(result, &format!("InternalHost{}", i)),
-        local_mac: parse_transfer_meaning(result, &format!("InternalMacHost{}", i)),
-        enable_local_mac: parse_transfer_meaning(result, &format!("MacEnable{}", i)).unwrap_or_default() == "1",
-        local_port_min: parse_transfer_meaning(result, &format!("MinIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinIntPort"))?,
-        local_port_max: parse_transfer_meaning(result, &format!("MaxIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxIntPort"))?,
-        description: parse_transfer_meaning(result, &format!("Description{}", i)),
-        port_map_creator: parse_transfer_meaning(result, &format!("PortMappCreator{}", i)),
-        lease_duration: parse_transfer_meaning(result, &format!("LeaseDuration{}", i)),
+        wan_interface: Self::parse_transfer_meaning(resp, &format!("WANCViewName{}", i)).unwrap_or_default(),
+        remote_addr_min: Self::parse_transfer_meaning(resp, &format!("MinRemoteHost{}", i)),
+        remote_addr_max: Self::parse_transfer_meaning(resp, &format!("MaxRemoteHost{}", i)),
+        remote_port_min: Self::parse_transfer_meaning(resp, &format!("MinExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinExtPort"))?,
+        remote_port_max: Self::parse_transfer_meaning(resp, &format!("MaxExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxExtPort"))?,
+        local_addr: Self::parse_transfer_meaning(resp, &format!("InternalHost{}", i)),
+        local_mac: Self::parse_transfer_meaning(resp, &format!("InternalMacHost{}", i)),
+        enable_local_mac: Self::parse_transfer_meaning(resp, &format!("MacEnable{}", i)).unwrap_or_default() == "1",
+        local_port_min: Self::parse_transfer_meaning(resp, &format!("MinIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinIntPort"))?,
+        local_port_max: Self::parse_transfer_meaning(resp, &format!("MaxIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxIntPort"))?,
+        description: Self::parse_transfer_meaning(resp, &format!("Description{}", i)),
+        port_map_creator: Self::parse_transfer_meaning(resp, &format!("PortMappCreator{}", i)),
+        lease_duration: Self::parse_transfer_meaning(resp, &format!("LeaseDuration{}", i)),
       });
     }
 
-    if error_str != "SUCC" {
-      error!("error: {}, {}, {}", error_str, error_param, error_type);
+    let api_result = Self::parse_api_result(resp);
+    debug!("api_result: {:?}", api_result);
+    if api_result.error_str != "SUCC" {
+      error!("error: {:?}", api_result);
     }
 
-    Ok((PortForwardingError {
-      error_str: error_str.to_string(),
-      error_param: error_param.to_string(),
-      error_type: error_type.to_string(),
-    }, list))
+    Ok((api_result, list))
   }
 
   pub async fn port_forwarding_list(&mut self) -> Result<Vec<PortForwardingParam>> {
@@ -516,6 +557,16 @@ async fn test_login() -> Result<()> {
   info!("{:?}", ctx.session);
   let wan_info = ctx.wan_info().await?;
   info!("{:?}", wan_info);
+  Ok(())
+}
+
+#[tokio::test]
+async fn test_info() -> Result<()> {
+  let ctx = get_ctx().await?;
+  let wan_info = ctx.wan_info().await?;
+  info!("{:?}", wan_info);
+  let lan_info = ctx.lan_info().await?;
+  info!("{:?}", lan_info);
   Ok(())
 }
 
