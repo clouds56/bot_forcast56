@@ -13,6 +13,7 @@ pub struct Session {
   session_token: String,
 }
 
+// this mod is a serde helper that parse json string "1" to rust true, "0" to rust false
 mod serde_str01_as_bool {
   use serde::{self, Deserialize, Deserializer, Serializer};
 
@@ -26,6 +27,7 @@ mod serde_str01_as_bool {
   }
 }
 
+/// this mod is a serde helper that parse json string "123" to rust u32 123
 mod serde_str_as_u32 {
   use serde::{self, Deserialize, Deserializer, Serializer};
 
@@ -45,6 +47,7 @@ mod serde_str_as_u32 {
   }
 }
 
+/// this mod is a serde helper that parse json string "NULL" to rust None
 mod serde_strnull_as_option {
   use serde::{self, Deserialize, Deserializer, Serializer};
 
@@ -146,28 +149,41 @@ pub enum WanInfo {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct LanInfo {
-  // 客户端名称/主机名
-  // HostName
+  /// 客户端名称/主机名
+  /// HostName
   pub name: String,
-  // MAC地址: xx:xx:xx:xx:xx:xx
-  // MACAddr
+  /// MAC地址: xx:xx:xx:xx:xx:xx
+  /// MACAddr
   pub mac: String,
-  // IP地址: 0.0.0.0
-  // IPAddr
+  /// IP地址: 0.0.0.0
+  /// IPAddr
   pub ip: String,
-  // 剩余租期: 58473
-  // ExpiredTime
+  /// 剩余租期: 58473
+  /// ExpiredTime
   pub lease_time: String,
-  // 端口: LAN4
-  // PhyPortName
+  /// 端口: LAN4
+  /// PhyPortName
   pub interface: String,
 }
 
+
+/// parsing from
+/// ```html
+/// <select name="Frm_WANCViewName" id="Frm_WANCViewName"  size="1" class="list_13">
+/// <option value="IGD.WD1.WCD3.WCPPP1" ipmode="3" >&#51;&#95;&#73;&#78;&#84;&#69;&#82;&#78;&#69;&#84;&#95;&#82;&#95;&#86;&#73;&#68;&#95;</option>
+/// </select>
+/// ```
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct WancInfo {
+  /// Transfer_meaning('WANCName', '')
+  /// <option value>{ name }</option>
   pub name: String,
+  /// Transfer_meaning('WANCViewName', '')
+  /// <option value="IGD.WD1.WCD3.WCPPP1">
   pub view_name: String,
+  /// Transfer_meaning('ViewName', '')
   pub desc_name: String,
+  /// <option ipmode="3">
   pub ipmode: isize,
 }
 
@@ -210,7 +226,9 @@ pub enum PortForwardingAction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PortForwardingHost {
+  /// InternalHost, with MacEnable=false
   Host(String),
+  /// InternalMacHost, with MacEnable=true
   Mac(String),
 }
 impl std::fmt::Display for PortForwardingHost {
@@ -256,41 +274,56 @@ impl PortForwardingHost {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PortForwardingPort {
+  /// MinIntPort = MaxIntPort = MinExtPort = MaxExtPort
   Simple(u32),
+  /// MinIntPort = MaxIntPort = local
+  /// MinExtPort = MaxExtPort = remote
   Transform { remote: u32, local: u32 },
+  /// MinIntPort = local.0, MaxIntPort = local.1
+  /// MinExtPort = remote.0, MaxExtPort = remote.1
   Multiple { remote: (u32, u32), local: (u32, u32) },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct PortForwardingParam {
-  // "0": true, "1": false
+  /// "0": true, "1": false
   #[serde(with = "serde_str01_as_bool")]
   pub enable: bool,
   pub name: String,
-  // "0": TCP, "1": UDP, "2", TCP AND UDP
+  /// "0": TCP, "1": UDP, "2", TCP AND UDP
   pub protocol: PortForwardingProtocol,
+  /// "IGD.WD1.***", wan interface view name (maybe vlan related)
   #[serde(rename="WANCViewName")]
   pub wan_interface: String,
+  /// allowed remote host: `remote_addr_min..=remote_addr_max`
   #[serde(rename="MinRemoteHost", with="serde_strnull_as_option")]
   #[tabled(display_with = "display_option")]
   pub remote_addr_min: Option<String>,
+  /// allowed remote host: `remote_addr_min..=remote_addr_max`
   #[serde(rename="MaxRemoteHost", with="serde_strnull_as_option")]
   #[tabled(display_with = "display_option")]
   pub remote_addr_max: Option<String>,
+  /// listening port on router: `remote_port_min..=remote_port_max`
   #[serde(rename="MinExtPort", with="serde_str_as_u32")]
   pub remote_port_min: u32,
+  /// listening port on router: `remote_port_min..=remote_port_max`
   #[serde(rename="MaxExtPort", with="serde_str_as_u32")]
   pub remote_port_max: u32,
+  /// redirect to `local_addr` (ip address)
   #[serde(rename="InternalHost", with="serde_strnull_as_option")]
   #[tabled(display_with = "display_option")]
   pub local_addr: Option<String>,
+  /// redirect to `local_mac` (mac address)
   #[serde(rename="InternalMacHost", with="serde_strnull_as_option")]
   #[tabled(display_with = "display_option")]
   pub local_mac: Option<String>,
+  /// when enabled, `local_mac` is used, otherwise `local_addr` is used
   #[serde(rename="MacEnable", with="serde_str01_as_bool")]
   pub enable_local_mac: bool,
+  /// redirect to `local_port_min..=local_port_max`
   #[serde(rename="MinIntPort", with="serde_str_as_u32")]
   pub local_port_min: u32,
+  /// redirect to `local_port_min..=local_port_max`
   #[serde(rename="MaxIntPort", with="serde_str_as_u32")]
   pub local_port_max: u32,
   #[serde(with="serde_strnull_as_option")]
@@ -306,6 +339,7 @@ pub struct PortForwardingParam {
 
 #[derive(Debug, Clone)]
 pub struct ApiResult {
+  /// 'SUCC' for success, "" might be not presented
   pub error_str: String,
   pub error_param: String,
   pub error_type: String,
@@ -320,6 +354,7 @@ impl ApiResult {
   }
 }
 
+/// parsing from `<div>{text}</div>` or `<div><input type="text" value="{text}"></div>`
 fn parse_node_text(node: select::node::Node<'_>) -> String {
   match node.first_child() {
     Some(e) if e.name() == Some("input") => {
@@ -329,6 +364,7 @@ fn parse_node_text(node: select::node::Node<'_>) -> String {
   }
 }
 
+/// parsing from `Transfer_meaning('{field}', '{value}');`
 fn parse_transfer_meaning(resp: &str, field: &str) -> Option<String> {
   let value = resp
     .split(&format!("Transfer_meaning('{}',", field)).skip(1).last()?
@@ -421,9 +457,14 @@ impl<'a> Request<'a> {
 }
 
 pub struct Context {
+  /// the ip of router, might be "http://192.168.1.1"
   pub base_url: String,
+  /// if provided, last response would be saved to `cache_path`
   pub cache_path: Option<PathBuf>,
+  /// internal `reqwest::Client`, use `Context::get` and `Context::set`
+  /// for auto detect `ApiResult` and `update_session`
   pub _client: reqwest::Client,
+  /// saved session_token, the session_token would be changed even in GET method
   pub session: Option<Session>,
 }
 
@@ -536,6 +577,18 @@ impl Context {
     let dom = select::document::Document::from_read(resp.as_bytes())?;
     let mut result = Vec::new();
     for table in dom.find(Name("div").and(Class("space_0"))) {
+      // parse kv from
+      // ```html
+      // <div class="space_0">
+      // <table id="TestContent" class="infor" width="410" border="0" cellpadding="0" cellspacing="1" bgcolor="#979797">
+      // <tr class="white_1">
+      // <td class="tdleft_1">模式</td>
+      // <td class="tdright">PPPoE</td>
+      // </tr>
+      // ...
+      // </table>
+      // </div>
+      // ```
       let mut kv = HashMap::new();
       for tr in table.find(Name("tr")) {
         let mut td = tr.find(Name("td")).map(|i| parse_node_text(i).trim().to_string());
@@ -676,6 +729,8 @@ impl Context {
     Ok(list)
   }
 
+  /// only `PortForwardingAction::Delete` and `PortForwardingAction::DeleteByName` accepted,
+  /// for other usage, see `Context::port_forwarding`
   pub async fn port_forwarding_delete(&mut self, action: PortForwardingAction) -> Result<Vec<PortForwardingParam>> {
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "PascalCase")]
@@ -729,6 +784,8 @@ impl Context {
     Ok(list)
   }
 
+  /// only `PortForwardingAction::New` and `PortForwardingAction::Apply` accepted,
+  /// for other usage, see `Context::port_forwarding_delete`
   pub async fn port_forwarding(&mut self, action: PortForwardingAction, name: &str, protocol: PortForwardingProtocol, wan: &str, lan: PortForwardingHost, port: PortForwardingPort) -> Result<Vec<PortForwardingParam>> {
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "PascalCase")]
