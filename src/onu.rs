@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::{Path, PathBuf}};
 
 use anyhow::Result;
 use select::predicate::Predicate;
@@ -216,9 +216,110 @@ pub struct ApiResult {
   pub error_type: String,
 }
 
+fn parse_node_text(node: select::node::Node<'_>) -> String {
+  match node.first_child() {
+    Some(e) if e.name() == Some("input") => {
+      e.attr("value").unwrap_or_default().to_string()
+    },
+    _ => node.text()
+  }
+}
+
+fn parse_transfer_meaning(resp: &str, field: &str) -> Option<String> {
+  let value = resp
+    .split(&format!("Transfer_meaning('{}',", field)).skip(1).last()?
+    .splitn(2, ')').nth(0)?
+    .trim().strip_prefix('\'')?.strip_suffix('\'')?
+    .replace("\\x2d", "\x2d")
+    .replace("\\x2e", "\x2e")
+    .replace("\\x3a", "\x3a")
+    .replace("\\x5f", "\x5f")
+    .to_string();
+  Some(value)
+}
+
+pub struct Request<'a> {
+  session: &'a mut Option<Session>,
+  cache_path: Option<&'a Path>,
+  request: reqwest::RequestBuilder,
+}
+
+impl<'a> Request<'a> {
+  fn parse_session(resp: &str) -> Option<Session> {
+    let session_token = resp.split("var session_token = ").skip(1).last()?
+      .splitn(3, '"').nth(1)?;
+    let url_next = resp
+      .split("function getURL(){var ret = ").nth(1)?
+      .splitn(3, '"').nth(1)?;
+    debug!("session_token: {}", session_token);
+    Some(Session {
+      url_next: url_next.to_string(),
+      session_token: session_token.to_string(),
+    })
+  }
+
+  pub async fn send(self) -> Result<(ApiResult, String)> {
+    let (client, request) = self.request.build_split();
+    let request = request?;
+    debug!("request: {:?} {:?}", request.method(), request.url().as_str());
+    let resp = client.execute(request).await?;
+    let url = resp.url().to_string();
+    let text = resp.text().await?;
+    if let Some(cache_path) = self.cache_path {
+      std::fs::write(&cache_path, &text)?;
+      debug!("cache: {} => {}", url, cache_path.display());
+    }
+    if let Some(session) = Self::parse_session(&text) {
+      debug!("update session: {}", session.session_token);
+      *self.session = Some(session);
+    }
+    let err = Self::parse_api_result(&text);
+    if err.error_str != "SUCC" {
+      error!("request {url} failed: {err:?}");
+    }
+    Ok((err, text))
+  }
+
+  pub fn form<T: serde::Serialize>(mut self, data: T) -> Self {
+    #[derive(serde::Serialize)]
+    struct WithSessionToken<T: serde::Serialize> {
+      #[serde(flatten)]
+      data: T,
+      #[serde(rename = "_SESSION_TOKEN")]
+      session_token: String,
+    }
+    self.request = match self.session {
+      Some(session) => {
+        let data = WithSessionToken {
+          data,
+          session_token: std::mem::take(&mut session.session_token),
+        };
+        session.session_token = String::new();
+        self.request.form(&data)
+      },
+      None => {
+        self.request.form(&data)
+      },
+    };
+    self
+  }
+
+  fn parse_api_result(resp: &str) -> ApiResult {
+    let error_str = parse_transfer_meaning(resp, "IF_ERRORSTR").unwrap_or_default();
+    let error_param = parse_transfer_meaning(resp, "IF_ERRORPARAM").unwrap_or_default();
+    let error_type = parse_transfer_meaning(resp, "IF_ERRORTYPE").unwrap_or_default();
+    ApiResult {
+      error_str,
+      error_param,
+      error_type,
+    }
+  }
+}
+
 pub struct Context {
   pub base_url: String,
-  pub client: reqwest::Client,
+  pub cache_path: Option<PathBuf>,
+  pub _client: reqwest::Client,
   pub session: Option<Session>,
 }
 
@@ -226,8 +327,9 @@ impl Context {
   pub fn new<S: ToString>(base_url: S) -> Self {
     Self {
       base_url: base_url.to_string(),
-      client: reqwest::Client::new(),
+      _client: reqwest::Client::new(),
       session: None,
+      cache_path: None,
     }
   }
 
@@ -237,25 +339,31 @@ impl Context {
     format!("{}/{}{}", self.base_url, self.session.as_ref().map(|s| s.url_next.as_str()).unwrap_or("getpage.gch?pid=1002&nextpage="), page)
   }
 
-  fn update_session(&mut self, resp: &str) -> Result<bool> {
-    let session_token = match resp.split("var session_token = ").nth(1) {
-      Some(s) => s,
-      _ => return Ok(false),
-    }.splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("session_token parse failed"))?;
-    let url_next = resp
-      .split("function getURL(){var ret = ").nth(1).ok_or_else(|| anyhow::format_err!("url_next not found"))?
-      .splitn(3, '"').nth(1).ok_or_else(|| anyhow::format_err!("url_next parse failed"))?;
-    debug!("session_token: {}", session_token);
-    self.session = Some(Session { url_next: url_next.to_string(), session_token: session_token.to_string() });
-    Ok(true)
+  pub fn get(&mut self, page: &str) -> Request {
+    let url = self.next_url(page);
+    Request {
+      session: &mut self.session,
+      cache_path: self.cache_path.as_deref(),
+      request: self._client.get(url),
+    }
   }
 
-  pub async fn do_login(&mut self, username: &str, password: &str) -> Result<()> {
-    let session = self.login(username, password).await?;
+  pub fn post(&mut self, page: &str) -> Request {
+    let url = self.next_url(page);
+    Request {
+      session: &mut self.session,
+      cache_path: self.cache_path.as_deref(),
+      request: self._client.post(url),
+    }
+  }
+
+  pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+    let session = self.init_session(username, password).await?;
     self.session = Some(session);
     Ok(())
   }
-  pub async fn login(&self, username: &str, password: &str) -> Result<Session> {
+
+  pub async fn init_session(&self, username: &str, password: &str) -> Result<Session> {
     #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum LoginAction {
@@ -274,7 +382,7 @@ impl Context {
       #[serde(rename = "Password")]
       password: String,
     }
-    let client = self.client.clone();
+    let client = self._client.clone();
     let resp = client.get(self.base_url()).send().await?.text().await?;
     let login_token = resp
       .split(r#"getObj("Frm_Logintoken").value = "#).nth(1).unwrap_or(r#""1""#)
@@ -318,49 +426,15 @@ impl Context {
     })
   }
 
-  fn parse_node_text(node: select::node::Node<'_>) -> String {
-    match node.first_child() {
-      Some(e) if e.name() == Some("input") => {
-        e.attr("value").unwrap_or_default().to_string()
-      },
-      _ => node.text()
-    }
-  }
-
-  fn parse_transfer_meaning(resp: &str, field: &str) -> Option<String> {
-    let value = resp
-      .split(&format!("Transfer_meaning('{}',", field)).skip(1).last()?
-      .splitn(2, ')').nth(0)?
-      .trim().strip_prefix('\'')?.strip_suffix('\'')?
-      .replace("\\x2d", "\x2d")
-      .replace("\\x2e", "\x2e")
-      .replace("\\x3a", "\x3a")
-      .replace("\\x5f", "\x5f")
-      .to_string();
-    Some(value)
-  }
-
-  fn parse_api_result(resp: &str) -> ApiResult {
-    let error_str = Self::parse_transfer_meaning(resp, "IF_ERRORSTR").unwrap_or_default();
-    let error_param = Self::parse_transfer_meaning(resp, "IF_ERRORPARAM").unwrap_or_default();
-    let error_type = Self::parse_transfer_meaning(resp, "IF_ERRORTYPE").unwrap_or_default();
-    ApiResult {
-      error_str,
-      error_param,
-      error_type,
-    }
-  }
-
-  pub async fn wan_info(&self) -> Result<Vec<WanInfo>> {
+  pub async fn wan_info(&mut self) -> Result<Vec<WanInfo>> {
     use select::predicate::{Class, Name};
-    let client = self.client.clone();
-    let resp = client.get(self.next_url("status_ethwan_if_t.gch")).send().await?.text().await?;
+    let (_, resp) = self.get("status_ethwan_if_t.gch").send().await?;
     let dom = select::document::Document::from_read(resp.as_bytes())?;
     let mut result = Vec::new();
     for table in dom.find(Name("div").and(Class("space_0"))) {
       let mut kv = HashMap::new();
       for tr in table.find(Name("tr")) {
-        let mut td = tr.find(Name("td")).map(|i| Self::parse_node_text(i).trim().to_string());
+        let mut td = tr.find(Name("td")).map(|i| parse_node_text(i).trim().to_string());
         kv.entry(td.next().unwrap_or_default()).or_insert(td.next().unwrap_or_default());
       }
       let wan_info = match kv.get("模式").map(String::as_str) {
@@ -398,77 +472,63 @@ impl Context {
     Ok(result)
   }
 
-  pub async fn lan_info(&self) -> Result<Vec<LanInfo>> {
-    let client = self.client.clone();
-    let resp = client.get(self.next_url("status_ethlan_dhcp_info_t.gch")).send().await?.text().await?;
-    std::fs::write("cache.html", &resp)?;
-    Self::parse_api_result(resp.as_str());
-    let count = Self::parse_transfer_meaning(resp.as_str(), "IF_INSTNUM").unwrap_or_default()
+  pub async fn lan_info(&mut self) -> Result<Vec<LanInfo>> {
+    let (_, resp) = self.get("status_ethlan_dhcp_info_t.gch").send().await?;
+    let count = parse_transfer_meaning(resp.as_str(), "IF_INSTNUM").unwrap_or_default()
       .parse::<usize>().map_err(|_| anyhow::format_err!("parse IF_INSTNUM"))?;
     let mut result = Vec::new();
     for i in 0..count {
       result.push(LanInfo {
-        name: Self::parse_transfer_meaning(resp.as_str(), &format!("HostName{}", i)).unwrap_or_default(),
-        mac: Self::parse_transfer_meaning(resp.as_str(), &format!("MACAddr{}", i)).unwrap_or_default(),
-        ip: Self::parse_transfer_meaning(resp.as_str(), &format!("IPAddr{}", i)).unwrap_or_default(),
-        lease_time: Self::parse_transfer_meaning(resp.as_str(), &format!("ExpiredTime{}", i)).unwrap_or_default(),
-        interface: Self::parse_transfer_meaning(resp.as_str(), &format!("PhyPortName{}", i)).unwrap_or_default(),
+        name: parse_transfer_meaning(resp.as_str(), &format!("HostName{}", i)).unwrap_or_default(),
+        mac: parse_transfer_meaning(resp.as_str(), &format!("MACAddr{}", i)).unwrap_or_default(),
+        ip: parse_transfer_meaning(resp.as_str(), &format!("IPAddr{}", i)).unwrap_or_default(),
+        lease_time: parse_transfer_meaning(resp.as_str(), &format!("ExpiredTime{}", i)).unwrap_or_default(),
+        interface: parse_transfer_meaning(resp.as_str(), &format!("PhyPortName{}", i)).unwrap_or_default(),
       });
     }
     Ok(result)
   }
 
-  fn parse_forwarding_list(resp: &str) -> Result<(ApiResult, Vec<PortForwardingParam>)> {
+  fn parse_forwarding_list(resp: &str) -> Result<Vec<PortForwardingParam>> {
     let mut list = Vec::new();
-    let count = Self::parse_transfer_meaning(resp, "IF_INSTNUM").unwrap_or_default()
+    let count = parse_transfer_meaning(resp, "IF_INSTNUM").unwrap_or_default()
       .parse::<usize>().map_err(|_| anyhow::format_err!("parse IF_INSTNUM"))?;
     for i in 0..count {
       list.push(PortForwardingParam {
-        enable: Self::parse_transfer_meaning(resp, &format!("Enable{}", i)).unwrap_or_default() == "1",
-        name: Self::parse_transfer_meaning(resp, &format!("Name{}", i)).unwrap_or_default(),
-        protocol: match Self::parse_transfer_meaning(resp, &format!("Protocol{}", i)).unwrap_or_default().as_str() {
+        enable: parse_transfer_meaning(resp, &format!("Enable{}", i)).unwrap_or_default() == "1",
+        name: parse_transfer_meaning(resp, &format!("Name{}", i)).unwrap_or_default(),
+        protocol: match parse_transfer_meaning(resp, &format!("Protocol{}", i)).unwrap_or_default().as_str() {
           "0" => PortForwardingProtocol::TCP,
           "1" => PortForwardingProtocol::UDP,
           "2" => PortForwardingProtocol::Both,
           _ => anyhow::bail!("unknown protocol"),
         },
-        wan_interface: Self::parse_transfer_meaning(resp, &format!("WANCViewName{}", i)).unwrap_or_default(),
-        remote_addr_min: Self::parse_transfer_meaning(resp, &format!("MinRemoteHost{}", i)),
-        remote_addr_max: Self::parse_transfer_meaning(resp, &format!("MaxRemoteHost{}", i)),
-        remote_port_min: Self::parse_transfer_meaning(resp, &format!("MinExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinExtPort"))?,
-        remote_port_max: Self::parse_transfer_meaning(resp, &format!("MaxExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxExtPort"))?,
-        local_addr: Self::parse_transfer_meaning(resp, &format!("InternalHost{}", i)),
-        local_mac: Self::parse_transfer_meaning(resp, &format!("InternalMacHost{}", i)),
-        enable_local_mac: Self::parse_transfer_meaning(resp, &format!("MacEnable{}", i)).unwrap_or_default() == "1",
-        local_port_min: Self::parse_transfer_meaning(resp, &format!("MinIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinIntPort"))?,
-        local_port_max: Self::parse_transfer_meaning(resp, &format!("MaxIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxIntPort"))?,
-        description: Self::parse_transfer_meaning(resp, &format!("Description{}", i)),
-        port_map_creator: Self::parse_transfer_meaning(resp, &format!("PortMappCreator{}", i)),
-        lease_duration: Self::parse_transfer_meaning(resp, &format!("LeaseDuration{}", i)),
+        wan_interface: parse_transfer_meaning(resp, &format!("WANCViewName{}", i)).unwrap_or_default(),
+        remote_addr_min: parse_transfer_meaning(resp, &format!("MinRemoteHost{}", i)),
+        remote_addr_max: parse_transfer_meaning(resp, &format!("MaxRemoteHost{}", i)),
+        remote_port_min: parse_transfer_meaning(resp, &format!("MinExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinExtPort"))?,
+        remote_port_max: parse_transfer_meaning(resp, &format!("MaxExtPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxExtPort"))?,
+        local_addr: parse_transfer_meaning(resp, &format!("InternalHost{}", i)),
+        local_mac: parse_transfer_meaning(resp, &format!("InternalMacHost{}", i)),
+        enable_local_mac: parse_transfer_meaning(resp, &format!("MacEnable{}", i)).unwrap_or_default() == "1",
+        local_port_min: parse_transfer_meaning(resp, &format!("MinIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MinIntPort"))?,
+        local_port_max: parse_transfer_meaning(resp, &format!("MaxIntPort{}", i)).unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse MaxIntPort"))?,
+        description: parse_transfer_meaning(resp, &format!("Description{}", i)),
+        port_map_creator: parse_transfer_meaning(resp, &format!("PortMappCreator{}", i)),
+        lease_duration: parse_transfer_meaning(resp, &format!("LeaseDuration{}", i)),
       });
     }
 
-    let api_result = Self::parse_api_result(resp);
-    debug!("api_result: {:?}", api_result);
-    if api_result.error_str != "SUCC" {
-      error!("error: {:?}", api_result);
-    }
-
-    Ok((api_result, list))
+    Ok(list)
   }
 
   pub async fn port_forwarding_list(&mut self) -> Result<Vec<PortForwardingParam>> {
-    let client = self.client.clone();
-    let result = client.get(self.next_url("app_virtual_conf_t.gch")).send().await?
-      .text().await?;
-    self.update_session(&result)?;
-    let (_, list) = Self::parse_forwarding_list(&result)?;
+    let (_, resp) = self.get("app_virtual_conf_t.gch").send().await?;
+    let list = Self::parse_forwarding_list(&resp)?;
     Ok(list)
   }
 
   pub async fn port_forwarding(&mut self, action: PortForwardingAction, name: &str, protocol: PortForwardingProtocol, wan: &str, lan: &str, port: PortForwardingPort) -> Result<Vec<PortForwardingParam>> {
-    let client = self.client.clone();
-
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "lowercase")]
     pub enum PortForwardingActionName {
@@ -487,15 +547,13 @@ impl Context {
       index: i32,
       #[serde(flatten)]
       params: PortForwardingParam,
-      #[serde(rename="_SESSION_TOKEN")]
-      _session_token: String,
     }
     let (remote_port_min, remote_port_max, local_port_min, local_port_max) = match port {
       PortForwardingPort::Simple(p) => (p, p, p, p),
       PortForwardingPort::Transform { remote, local } => (remote, remote, local, local),
       PortForwardingPort::Multiple { remote: (remote_min, remote_max), local: (local_min, local_max) } => (remote_min, remote_max, local_min, local_max),
     };
-    let result = client.post(self.next_url("app_virtual_conf_t.gch")).form(&PortForwardingRequest {
+    let (err, resp) = self.post("app_virtual_conf_t.gch").form(&PortForwardingRequest {
       action: match action {
         PortForwardingAction::New => PortForwardingActionName::New,
         PortForwardingAction::Apply(_) => PortForwardingActionName::Apply,
@@ -524,14 +582,11 @@ impl Context {
         port_map_creator: None,
         lease_duration: None,
       },
-      _session_token: self.session.as_ref().map(|i| i.session_token.as_str()).unwrap_or_default().to_string(),
-    }).send().await?.text().await?;
-    self.update_session(result.as_str())?;
-    let (err, list) = Self::parse_forwarding_list(&result)?;
+    }).send().await?;
     if err.error_str != "SUCC" {
       anyhow::bail!("port forwarding failed: {:?}", err);
     }
-    // std::fs::write("cache.html", &result).ok();
+    let list = Self::parse_forwarding_list(&resp)?;
     Ok(list)
   }
 }
@@ -547,13 +602,13 @@ async fn get_ctx() -> Result<Context> {
   let password = std::env::var("router_password").unwrap_or_else(|_| "password".to_string());
   info!("login as {}", username);
   let mut ctx = Context::new("http://192.168.1.1");
-  ctx.do_login(&username, &password).await?;
+  ctx.login(&username, &password).await?;
   Ok(ctx)
 }
 
 #[tokio::test]
 async fn test_login() -> Result<()> {
-  let ctx = get_ctx().await?;
+  let mut ctx = get_ctx().await?;
   info!("{:?}", ctx.session);
   let wan_info = ctx.wan_info().await?;
   info!("{:?}", wan_info);
@@ -562,7 +617,7 @@ async fn test_login() -> Result<()> {
 
 #[tokio::test]
 async fn test_info() -> Result<()> {
-  let ctx = get_ctx().await?;
+  let mut ctx = get_ctx().await?;
   let wan_info = ctx.wan_info().await?;
   info!("{:?}", wan_info);
   let lan_info = ctx.lan_info().await?;
@@ -574,7 +629,23 @@ async fn test_info() -> Result<()> {
 async fn test_port_forwarding() -> Result<()> {
   let mut ctx = get_ctx().await?;
 
+  async fn clean_up(ctx: &mut Context) -> Result<()> {
+    loop {
+      let list = ctx.port_forwarding_list().await?;
+      for (i, t) in list.iter().enumerate().rev() {
+        if t.name.starts_with("__test_rust_onu__") {
+          info!("deleting {} {}", i, t.name);
+          ctx.port_forwarding(PortForwardingAction::Delete(i as _), &t.name, PortForwardingProtocol::TCP, "", "", PortForwardingPort::Simple(0)).await?;
+          continue;
+        }
+      }
+      return Ok(())
+    }
+  }
+
+  clean_up(&mut ctx).await?;
   for i in 0..10 {
+    info!("adding {}", 1050+i);
     ctx.port_forwarding(
       PortForwardingAction::New,
       &format!("__test_rust_onu__{}", i),
@@ -584,27 +655,20 @@ async fn test_port_forwarding() -> Result<()> {
       PortForwardingPort::Simple(1050+i)).await?;
   }
 
+  ctx.cache_path = Some("cache.html".into());
   let list = ctx.port_forwarding_list().await?;
+  ctx.cache_path = None;
   debug!("{:?}", list);
 
-  'outer: loop {
-    let list = ctx.port_forwarding_list().await?;
-    for (i, t) in list.iter().enumerate() {
-      if t.name.starts_with("__test_rust_onu__") {
-        info!("deleting {} {}", i, t.name);
-        ctx.port_forwarding(PortForwardingAction::Delete(i as _), &t.name, PortForwardingProtocol::TCP, "", "", PortForwardingPort::Simple(0)).await?;
-        continue 'outer;
-      }
-    }
-    break;
-  }
+  clean_up(&mut ctx).await?;
   Ok(())
 }
 
 #[test]
 fn test_parse() -> Result<()> {
   let result = std::fs::read_to_string("cache.html")?;
-  let (err, list) = Context::parse_forwarding_list(&result)?;
+  let err = Request::parse_api_result(&result);
+  let list = Context::parse_forwarding_list(&result)?;
   println!("{:?}", err);
   println!("{:?}", list);
   Ok(())
