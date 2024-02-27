@@ -64,7 +64,7 @@ mod serde_strnull_as_option {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct WanIpInfo {
   /// NAT: 启用
   pub nat: String,
@@ -96,13 +96,14 @@ impl WanIpInfo {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 #[serde(tag = "mode")]
 pub enum WanInfo {
   /// 模式: PPPoE
   PPPoE {
     /// 连接名称: 3_INTERNET_R_VID_
     name: String,
+    #[serde(flatten)]
     ip_info: WanIpInfo,
     /// 连接状态: 连接
     status: String,
@@ -116,6 +117,7 @@ pub enum WanInfo {
   DHCP {
     /// 连接名称: 1_TR069_VOICE_R_VID_46
     name: String,
+    #[serde(flatten)]
     ip_info: WanIpInfo,
     /// 连接状态: 连接
     status: String,
@@ -131,7 +133,7 @@ pub enum WanInfo {
 }
 
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct LanInfo {
   // 客户端名称/主机名
   // HostName
