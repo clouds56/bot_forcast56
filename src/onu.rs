@@ -64,6 +64,17 @@ mod serde_strnull_as_option {
   }
 }
 
+#[allow(unused)]
+fn display_debug<T: std::fmt::Debug>(o: &T) -> String {
+  format!("{:?}", o)
+}
+fn display_option<T: std::fmt::Display>(o: &Option<T>) -> String {
+  match o {
+    Some(s) => format!("{}", s),
+    None => format!(""),
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct WanIpInfo {
   /// NAT: 启用
@@ -152,6 +163,14 @@ pub struct LanInfo {
   pub interface: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
+pub struct WancInfo {
+  pub name: String,
+  pub view_name: String,
+  pub desc_name: String,
+  pub ipmode: isize,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PortForwardingProtocol {
   #[serde(rename = "0")]
@@ -161,10 +180,77 @@ pub enum PortForwardingProtocol {
   #[serde(rename = "2")]
   Both,
 }
+impl std::fmt::Display for PortForwardingProtocol {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      PortForwardingProtocol::TCP => write!(f, "TCP"),
+      PortForwardingProtocol::UDP => write!(f, "UDP"),
+      PortForwardingProtocol::Both => write!(f, "TCP/UDP"),
+    }
+  }
+}
+impl std::str::FromStr for PortForwardingProtocol {
+  type Err = &'static str;
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    let value = match s.to_lowercase().as_str() {
+      "tcp" => Self::TCP,
+      "udp" => Self::UDP,
+      "both" | "tcp/udp" | "udp/tcp" => Self::Both,
+      _ => return Err("unknown protocol"),
+    };
+    Ok(value)
+  }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PortForwardingAction {
-  New, Apply(u32), Delete(u32),
+  New, Apply(u32),
+  Delete(u32), DeleteByName(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PortForwardingHost {
+  Host(String),
+  Mac(String),
+}
+impl std::fmt::Display for PortForwardingHost {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      PortForwardingHost::Host(s) => write!(f, "{}", s),
+      PortForwardingHost::Mac(s) => write!(f, "{}", s),
+    }
+  }
+}
+impl std::str::FromStr for PortForwardingHost {
+  type Err = &'static str;
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    if s.contains(':') {
+      Ok(PortForwardingHost::Mac(s.to_string()))
+    } else {
+      Ok(PortForwardingHost::Host(s.to_string()))
+    }
+  }
+}
+
+impl PortForwardingHost {
+  pub fn as_host(&self) -> Option<&str> {
+    match self {
+      PortForwardingHost::Host(s) => Some(s.as_str()),
+      _ => None,
+    }
+  }
+  pub fn as_mac(&self) -> Option<&str> {
+    match self {
+      PortForwardingHost::Mac(s) => Some(s.as_str()),
+      _ => None,
+    }
+  }
+  pub fn is_mac(&self) -> bool {
+    match self {
+      PortForwardingHost::Mac(_) => true,
+      _ => false,
+    }
+  }
 }
 
 
@@ -175,7 +261,7 @@ pub enum PortForwardingPort {
   Multiple { remote: (u32, u32), local: (u32, u32) },
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
 pub struct PortForwardingParam {
   // "0": true, "1": false
   #[serde(with = "serde_str01_as_bool")]
@@ -186,16 +272,20 @@ pub struct PortForwardingParam {
   #[serde(rename="WANCViewName")]
   pub wan_interface: String,
   #[serde(rename="MinRemoteHost", with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub remote_addr_min: Option<String>,
   #[serde(rename="MaxRemoteHost", with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub remote_addr_max: Option<String>,
   #[serde(rename="MinExtPort", with="serde_str_as_u32")]
   pub remote_port_min: u32,
   #[serde(rename="MaxExtPort", with="serde_str_as_u32")]
   pub remote_port_max: u32,
   #[serde(rename="InternalHost", with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub local_addr: Option<String>,
   #[serde(rename="InternalMacHost", with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub local_mac: Option<String>,
   #[serde(rename="MacEnable", with="serde_str01_as_bool")]
   pub enable_local_mac: bool,
@@ -204,10 +294,13 @@ pub struct PortForwardingParam {
   #[serde(rename="MaxIntPort", with="serde_str_as_u32")]
   pub local_port_max: u32,
   #[serde(with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub description: Option<String>,
   #[serde(with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub lease_duration: Option<String>,
   #[serde(rename="PortMappCreator", with="serde_strnull_as_option")]
+  #[tabled(display_with = "display_option")]
   pub port_map_creator: Option<String>,
 }
 
@@ -216,6 +309,15 @@ pub struct ApiResult {
   pub error_str: String,
   pub error_param: String,
   pub error_type: String,
+}
+impl ApiResult {
+  pub fn is_success(&self) -> bool {
+    if self.error_str == "" {
+      warn!("maybe error: {:?}", self);
+      return true
+    }
+    self.error_str == "SUCC"
+  }
 }
 
 fn parse_node_text(node: select::node::Node<'_>) -> String {
@@ -276,7 +378,7 @@ impl<'a> Request<'a> {
       *self.session = Some(session);
     }
     let err = Self::parse_api_result(&text);
-    if err.error_str != "SUCC" {
+    if !err.is_success() {
       error!("request {url} failed: {err:?}");
     }
     Ok((err, text))
@@ -524,27 +626,115 @@ impl Context {
     Ok(list)
   }
 
+  pub fn parse_wanc_info(resp: &str) -> Result<Vec<WancInfo>> {
+    use select::predicate::{Attr, Name};
+    let mut result = select::document::Document::from_read(resp.as_bytes())?
+      .find(Attr("id", "Frm_WANCViewName").descendant(Name("option"))).map(|option| {
+        let name = option.text();
+        let view_name = option.attr("value").unwrap_or_default().to_string();
+        let ipmode = option.attr("ipmode").unwrap_or_default().parse().map_err(|_| anyhow::format_err!("parse ipmode"))?;
+        anyhow::Ok(WancInfo {
+          name: name.to_string(),
+          view_name: view_name.to_string(),
+          desc_name: String::new(),
+          ipmode,
+        })
+      }).collect::<Result<Vec<_>,_>>()?;
+
+    let count = parse_transfer_meaning(resp, "IF_INSTNUM").unwrap_or_default()
+      .parse::<usize>().unwrap_or_default();
+    for i in 0..count {
+      let name = parse_transfer_meaning(resp, &format!("WANCName{}", i)).unwrap_or_default();
+      let view_name = parse_transfer_meaning(resp, &format!("WANCViewName{}", i)).unwrap_or_default();
+      let desc_name = parse_transfer_meaning(resp, &format!("ViewName{}", i)).unwrap_or_default();
+      let found = result.iter_mut().find(|info| info.view_name == view_name).map(|i| {
+        if i.desc_name.is_empty() {
+          i.desc_name = desc_name.clone()
+        }
+      }).is_some();
+      if !found {
+        result.push(WancInfo {
+          name,
+          view_name,
+          desc_name,
+          ipmode: -1,
+        });
+      }
+    }
+    Ok(result)
+  }
+
+  pub async fn wanc_info(&mut self) -> Result<Vec<WancInfo>> {
+    let (_, resp) = self.get("app_virtual_conf_t.gch").send().await?;
+    let info = Self::parse_wanc_info(&resp)?;
+    Ok(info)
+  }
+
   pub async fn port_forwarding_list(&mut self) -> Result<Vec<PortForwardingParam>> {
     let (_, resp) = self.get("app_virtual_conf_t.gch").send().await?;
     let list = Self::parse_forwarding_list(&resp)?;
     Ok(list)
   }
 
-  pub async fn port_forwarding(&mut self, action: PortForwardingAction, name: &str, protocol: PortForwardingProtocol, wan: &str, lan: &str, port: PortForwardingPort) -> Result<Vec<PortForwardingParam>> {
-    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum PortForwardingActionName {
-      New, Apply, Delete,
-    }
-    // pub enum LocalHost {
-    //   Host(String),
-    //   MacHost(String),
-    // }
+  pub async fn port_forwarding_delete(&mut self, action: PortForwardingAction) -> Result<Vec<PortForwardingParam>> {
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "PascalCase")]
     pub struct PortForwardingRequest {
       #[serde(rename="IF_ACTION")]
-      action: PortForwardingActionName,
+      action: &'static str,
+      #[serde(rename="IF_INDEX")]
+      index: i32,
+      #[serde(flatten)]
+      params: PortForwardingParam,
+    }
+    let index = match action {
+      PortForwardingAction::New | PortForwardingAction::Apply(_) =>
+        anyhow::bail!("use port_forwarding instead"),
+      PortForwardingAction::Delete(i) => i,
+      PortForwardingAction::DeleteByName(name) => {
+        let list = self.port_forwarding_list().await?;
+        match list.iter().enumerate().find(|(_, p)| p.name == name) {
+          Some((i, _)) => i as _,
+          None => anyhow::bail!("cannot find name in list"),
+        }
+      },
+    };
+    let param = PortForwardingParam {
+      enable: false,
+      name: "".to_string(),
+      protocol: PortForwardingProtocol::TCP,
+      wan_interface: "".to_string(),
+      remote_addr_min: None,
+      remote_addr_max: None,
+      remote_port_min: 0,
+      remote_port_max: 0,
+      local_addr: None,
+      local_mac: None,
+      enable_local_mac: false,
+      local_port_min: 0,
+      local_port_max: 0,
+      description: None,
+      port_map_creator: None,
+      lease_duration: None,
+    };
+    let (err, resp) = self.post("app_virtual_conf_t.gch").form(&PortForwardingRequest {
+      action: "delete",
+      index: index as _,
+      params: param,
+    }).send().await?;
+    if !err.is_success() {
+      anyhow::bail!("port forwarding delete failed: {:?}", err);
+    }
+    let list = Self::parse_forwarding_list(&resp)?;
+    Ok(list)
+  }
+
+  pub async fn port_forwarding(&mut self, action: PortForwardingAction, name: &str, protocol: PortForwardingProtocol, wan: &str, lan: PortForwardingHost, port: PortForwardingPort) -> Result<Vec<PortForwardingParam>> {
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    pub struct PortForwardingRequest {
+      #[serde(rename="IF_ACTION")]
+      action: &'static str,
       #[serde(rename="IF_INDEX")]
       index: i32,
       #[serde(flatten)]
@@ -557,14 +747,15 @@ impl Context {
     };
     let (err, resp) = self.post("app_virtual_conf_t.gch").form(&PortForwardingRequest {
       action: match action {
-        PortForwardingAction::New => PortForwardingActionName::New,
-        PortForwardingAction::Apply(_) => PortForwardingActionName::Apply,
-        PortForwardingAction::Delete(_) => PortForwardingActionName::Delete,
+        PortForwardingAction::New => "new",
+        PortForwardingAction::Apply(_) => "apply",
+        PortForwardingAction::Delete(_) | PortForwardingAction::DeleteByName(_) =>
+          anyhow::bail!("use port_forwarding_delete instead"),
       },
       index: match action {
-        PortForwardingAction::New => -1,
         PortForwardingAction::Apply(i) => i as i32,
-        PortForwardingAction::Delete(i) => i as i32,
+        PortForwardingAction::New => -1,
+        _ => unreachable!(),
       },
       params: PortForwardingParam {
         enable: true,
@@ -575,9 +766,9 @@ impl Context {
         remote_addr_max: None,
         remote_port_min,
         remote_port_max,
-        local_addr: Some(lan.to_string()),
-        local_mac: None,
-        enable_local_mac: false,
+        local_addr: lan.as_host().map(ToString::to_string),
+        local_mac: lan.as_mac().map(ToString::to_string),
+        enable_local_mac: lan.is_mac(),
         local_port_min,
         local_port_max,
         description: None,
@@ -585,7 +776,7 @@ impl Context {
         lease_duration: None,
       },
     }).send().await?;
-    if err.error_str != "SUCC" {
+    if !err.is_success() {
       anyhow::bail!("port forwarding failed: {:?}", err);
     }
     let list = Self::parse_forwarding_list(&resp)?;
@@ -637,7 +828,7 @@ async fn test_port_forwarding() -> Result<()> {
       for (i, t) in list.iter().enumerate().rev() {
         if t.name.starts_with("__test_rust_onu__") {
           info!("deleting {} {}", i, t.name);
-          ctx.port_forwarding(PortForwardingAction::Delete(i as _), &t.name, PortForwardingProtocol::TCP, "", "", PortForwardingPort::Simple(0)).await?;
+          ctx.port_forwarding_delete(PortForwardingAction::Delete(i as _)).await?;
           continue;
         }
       }
@@ -653,7 +844,7 @@ async fn test_port_forwarding() -> Result<()> {
       &format!("__test_rust_onu__{}", i),
       PortForwardingProtocol::TCP,
       "IGD.WD1.WCD3.WCPPP1",
-      "1.1.1.1",
+      PortForwardingHost::Host("1.1.1.1".to_string()),
       PortForwardingPort::Simple(1050+i)).await?;
   }
 
