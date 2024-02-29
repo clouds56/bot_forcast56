@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::HashSet, str::FromStr, path::PathBuf};
 
 use anyhow::Result;
 use telegram_forcast56::onu::{self, PortForwardingHost, PortForwardingParam, PortForwardingProtocol};
@@ -85,6 +85,8 @@ enum PortForwardingAction {
 struct Cli {
   #[arg(long, default_value = "http://192.168.1.1")]
   base_url: String,
+  #[arg(long)]
+  cache_path: Option<PathBuf>,
   #[command(subcommand)]
   command: Commands,
 }
@@ -140,6 +142,7 @@ async fn main() -> Result<()> {
   match args.command {
     Commands::Info { target } => {
       let mut ctx = ctx(&args.base_url).await?;
+      ctx.cache_path = args.cache_path;
       match target {
         InfoTarget::Lan => {
           let info = ctx.lan_info().await?;
