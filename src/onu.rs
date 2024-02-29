@@ -187,6 +187,36 @@ pub struct WancInfo {
   pub ipmode: isize,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, tabled::Tabled)]
+pub struct Wan6Info {
+  /// PPP
+  pub name: String,
+  /// GUA获取方式: SLAAC
+  pub gua_assignment: String,
+  /// GUA
+  pub gua: String,
+  /// DNS获取方式: DHCPv6
+  pub dns_assignment: String,
+  /// DNS1
+  pub dns1: String,
+  /// DNS1
+  pub dns2: String,
+  /// DNS1
+  pub dns3: String,
+  /// WAN MAC
+  pub wan_mac: String,
+  /// 前缀获取方式: DHCPv6
+  pub prefix_assignment: String,
+  /// 获取前缀
+  pub prefix: String,
+  /// 网关获取方式
+  pub gateway_assignment: String,
+  /// 网关
+  pub gateway: String,
+  /// 连接状态
+  pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PortForwardingProtocol {
   #[serde(rename = "0")]
@@ -356,11 +386,9 @@ impl ApiResult {
 
 /// parsing from `<div>{text}</div>` or `<div><input type="text" value="{text}"></div>`
 fn parse_node_text(node: select::node::Node<'_>) -> String {
-  match node.first_child() {
-    Some(e) if e.name() == Some("input") => {
-      e.attr("value").unwrap_or_default().to_string()
-    },
-    _ => node.text()
+  match node.children().find(|n| n.name()==Some("input")) {
+    Some(e) => e.attr("value").unwrap_or_default().to_string(),
+    None => node.text()
   }
 }
 
@@ -723,6 +751,38 @@ impl Context {
     Ok(info)
   }
 
+  pub async fn wan6_info(&mut self) -> Result<Vec<Wan6Info>> {
+    use select::predicate::{Class, Name};
+    let (_, resp) = self.get("status_wanstatu_ipv6wansta_t.gch").send().await?;
+    let dom = select::document::Document::from_read(resp.as_bytes())?;
+
+    let mut result = Vec::new();
+    for table in dom.find(Name("div").and(Class("space_0"))) {
+      let mut kv = HashMap::new();
+      for tr in table.find(Name("tr")) {
+        let mut td = tr.find(Name("td")).map(|i| parse_node_text(i).trim().to_string());
+        kv.entry(td.next().unwrap_or_default()).or_insert(td.next().unwrap_or_default());
+      }
+      let info = Wan6Info {
+        name: kv.get("PPP").map(String::to_string).unwrap_or_default(),
+        gua_assignment: kv.get("GUA获取方式").map(String::to_string).unwrap_or_default(),
+        gua: kv.get("GUA").map(String::to_string).unwrap_or_default(),
+        dns_assignment: kv.get("DNS获取方式").map(String::to_string).unwrap_or_default(),
+        dns1: kv.get("DNS1").map(String::to_string).unwrap_or_default(),
+        dns2: kv.get("DNS2").map(String::to_string).unwrap_or_default(),
+        dns3: kv.get("DNS3").map(String::to_string).unwrap_or_default(),
+        wan_mac: kv.get("WAN MAC").map(String::to_string).unwrap_or_default(),
+        prefix_assignment: kv.get("前缀获取方式").map(String::to_string).unwrap_or_default(),
+        prefix: kv.get("获取前缀").map(String::to_string).unwrap_or_default(),
+        gateway_assignment: kv.get("网关获取方式").map(String::to_string).unwrap_or_default(),
+        gateway: kv.get("网关").map(String::to_string).unwrap_or_default(),
+        status: kv.get("连接状态").map(String::to_string).unwrap_or_default(),
+      };
+      result.push(info)
+    }
+    Ok(result)
+  }
+
   pub async fn port_forwarding_list(&mut self) -> Result<Vec<PortForwardingParam>> {
     let (_, resp) = self.get("app_virtual_conf_t.gch").send().await?;
     let list = Self::parse_forwarding_list(&resp)?;
@@ -921,6 +981,13 @@ fn test_parse() -> Result<()> {
   let list = Context::parse_forwarding_list(&result)?;
   println!("{:?}", err);
   println!("{:?}", list);
+  Ok(())
+}
+
+#[tokio::test]
+async fn test_parse_wan6() -> Result<()> {
+  let mut ctx = get_ctx().await?;
+  let _info = ctx.wan6_info().await?;
   Ok(())
 }
 

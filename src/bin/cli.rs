@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum InfoTarget {
-  Lan, Wan, #[clap(name = "upnp")] UPnP, Wanc,
+  Lan, Wan, #[clap(name = "upnp")] UPnP, Wanc, Wan6
 }
 
 impl std::fmt::Display for InfoTarget {
@@ -162,6 +162,11 @@ async fn main() -> Result<()> {
           let info = ctx.wanc_info().await?;
           println!("{}", tabled::Table::new(&info));
         }
+        InfoTarget::Wan6 => {
+          let info = ctx.wan6_info().await?;
+          let info_json = info.iter().map(serde_json::to_value).collect::<Result<Vec<_>,_>>()?;
+          println!("{}", csv_to_table(&json_to_csv(&info_json)?));
+        }
       }
     },
     Commands::PortForwarding { action } => {
@@ -222,4 +227,24 @@ impl From<PortForwardingParam> for PortForwardingParamView {
       description: value.description.unwrap_or_default(),
     }
   }
+}
+
+#[cfg(test)]
+mod test{
+  use super::*;
+
+#[tokio::test]
+async fn test_wan6_info() -> Result<()> {
+  dotenvy::dotenv().ok();
+  flexi_logger::Logger::try_with_env_or_str("info")?.start().ok();
+  let mut ctx = ctx("http://192.168.1.1").await?;
+  let wan6_info = ctx.wan6_info().await?;
+  info!("wan6_info: {:?}", wan6_info);
+  let info_json = wan6_info.iter().map(serde_json::to_value).collect::<Result<Vec<_>,_>>()?;
+  info!("info_json: {:?}", info_json);
+  let j_t_c = json_to_csv(&info_json)?;
+  info!("j_t_c: {:?}", j_t_c);
+  println!("{}", csv_to_table(&j_t_c));
+  Ok(())
+}
 }
